@@ -23,25 +23,16 @@ jobs:
           CODE_SIGN_IDENTITY="-"
           CODE_SIGNING_REQUIRED=NO
 
-      - name: Export app
+      - name: Package app
         run: |
-          APP_PATH="${{ runner.temp }}/Repo2Prompt.xcarchive/Products/Applications/Repo2Prompt.app"
-          cp -R "$APP_PATH" "${{ runner.temp }}/Repo2Prompt.app"
-
-      - name: Create DMG
-        run: |
-          DMG_PATH="${{ runner.temp }}/Repo2Prompt.dmg"
-          hdiutil create -volname "Repo2Prompt" \
-            -srcfolder "${{ runner.temp }}/Repo2Prompt.app" \
-            -ov -format UDZO \
-            "$DMG_PATH"
-          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+          cd "${{ runner.temp }}/Repo2Prompt.xcarchive/Products/Applications"
+          zip -r "${{ runner.temp }}/Repo2Prompt.zip" Repo2Prompt.app
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" "$DMG_PATH" \
+          gh release create "$TAG" "${{ runner.temp }}/Repo2Prompt.zip" \
             --title "Repo2Prompt $TAG" \
             --generate-notes

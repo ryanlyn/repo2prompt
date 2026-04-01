@@ -1,24 +1,573 @@
-//
-//  ContentView.swift
-//  Repo2Prompt
-//
-//  Created by Ryan on 31/3/2026.
-//
-
 import SwiftUI
 
+// MARK: - Recent Directory Model
+
+struct RecentDirectory: Codable, Identifiable, Equatable {
+    var id: String { path }
+    let path: String
+    var name: String
+    var bookmarkData: Data?
+    var isStarred: Bool = false
+    var lastAccessed: Date = Date()
+}
+
+// MARK: - Content View
+
 struct ContentView: View {
+    private enum Constants {
+        static let recentDirectoriesKey = "recentDirectories"
+        static let maximumRecents = 20
+    }
+
+    fileprivate struct PreviewState {
+        let selectedURL: URL?
+        let rootNode: FileNode?
+        let settings: ScanSettings
+        let recents: [RecentDirectory]
+    }
+
+    #if DEBUG
+    static let defaultURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    #endif
+
+    @State private var selectedURL: URL?
+    @State private var rootNode: FileNode?
+    @State private var isScanning = false
+    @State private var errorMessage: String?
+    @State private var copied = false
+    @State private var showSettings = true
+    @State private var gitDiffContent: String?
+    @State private var settings = ScanSettings()
+    @State private var recents: [RecentDirectory] = []
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
+
+    private var isRunningInPreview: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCODE_RUNNING_FOR_PREVIEWS"] == "1" ||
+            environment["XCODE_RUNNING_FOR_PLAYGROUNDS"] == "1"
+    }
+
+    private var starredRecents: [RecentDirectory] {
+        sortedRecents.filter(\.isStarred)
+    }
+
+    private var unstarredRecents: [RecentDirectory] {
+        sortedRecents.filter { !$0.isStarred }
+    }
+
+    init() {
+        _selectedURL = State(initialValue: nil)
+        _rootNode = State(initialValue: nil)
+        _isScanning = State(initialValue: false)
+        _errorMessage = State(initialValue: nil)
+        _copied = State(initialValue: false)
+        _showSettings = State(initialValue: true)
+        _gitDiffContent = State(initialValue: nil)
+        _settings = State(initialValue: ScanSettings())
+        _recents = State(initialValue: [])
+        _sidebarVisibility = State(initialValue: .all)
+    }
+
+    fileprivate init(previewState: PreviewState) {
+        _selectedURL = State(initialValue: previewState.selectedURL)
+        _rootNode = State(initialValue: previewState.rootNode)
+        _isScanning = State(initialValue: false)
+        _errorMessage = State(initialValue: nil)
+        _copied = State(initialValue: false)
+        _showSettings = State(initialValue: true)
+        _gitDiffContent = State(initialValue: nil)
+        _settings = State(initialValue: previewState.settings)
+        _recents = State(initialValue: previewState.recents)
+        _sidebarVisibility = State(initialValue: .all)
+    }
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
+            sidebarView()
+        } detail: {
+            detailView()
         }
-        .padding()
+        .frame(minWidth: 700, minHeight: 500)
+        .onAppear {
+            guard !isRunningInPreview else { return }
+            loadRecents()
+            #if DEBUG
+            let url = Self.defaultURL
+            scan(url)
+            addRecent(url)
+            #endif
+        }
+        .onChange(of: settings.includeGlob) { _, _ in applyFilters() }
+        .onChange(of: settings.excludeGlob) { _, _ in applyFilters() }
+        .onChange(of: settings.sortOrder) { _, _ in applySort() }
+    }
+
+    // MARK: - Sidebar
+
+    private func sidebarView() -> some View {
+        List {
+            if !starredRecents.isEmpty {
+                Section("Starred") {
+                    ForEach(starredRecents) { recent in
+                        recentRow(recent)
+                    }
+                }
+            }
+
+            Section("Recent") {
+                ForEach(unstarredRecents) { recent in
+                    recentRow(recent)
+                }
+            }
+        }
+        .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
+        .safeAreaInset(edge: .bottom) {
+            Button {
+                pickFolder()
+            } label: {
+                Label("Choose Folder...", systemImage: "folder.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.glass)
+            .padding()
+        }
+    }
+
+    private func recentRow(_ recent: RecentDirectory) -> some View {
+        Button {
+            openRecent(recent)
+        } label: {
+            HStack {
+                Image(systemName: "folder.fill")
+                    .foregroundStyle(.blue)
+                Text(recent.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Button {
+                    toggleStar(recent)
+                } label: {
+                    Image(systemName: recent.isStarred ? "star.fill" : "star")
+                        .foregroundStyle(recent.isStarred ? .yellow : .secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .contextMenu {
+            Button(recent.isStarred ? "Unstar" : "Star") {
+                toggleStar(recent)
+            }
+            Button("Remove from Recents", role: .destructive) {
+                removeRecent(recent)
+            }
+        }
+    }
+
+    // MARK: - Detail
+
+    private func detailView() -> some View {
+        VStack(spacing: 0) {
+            if showSettings {
+                SettingsPanel(settings: settings, onRescanNeeded: { rescanSelectedFolder() })
+                Divider()
+            }
+
+            if let rootNode {
+                fileTree(rootNode)
+            } else {
+                ContentUnavailableView(
+                    "No Folder Selected",
+                    systemImage: "folder",
+                    description: Text("Choose a folder from the sidebar or add one.")
+                )
+                .frame(maxHeight: .infinity)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            copyPromptButton
+        }
+        .toolbar(content: detailToolbar)
+    }
+
+    @ToolbarContentBuilder
+    private func detailToolbar() -> some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button {
+                withAnimation { showSettings.toggle() }
+            } label: {
+                Image(systemName: showSettings ? "gearshape.fill" : "gearshape")
+            }
+            .help("Toggle settings")
+        }
+
+        ToolbarItem(placement: .automatic) {
+            if isScanning {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            if let rootNode {
+                toolbarSummary(
+                    fileCount: rootNode.selectedFileCount,
+                    tokenCount: rootNode.effectiveTokenCount
+                )
+            }
+        }
+        .sharedBackgroundVisibility(.hidden)
+    }
+
+    private func toolbarSummary(fileCount: Int, tokenCount: Int) -> some View {
+        HStack(spacing: 12) {
+            Text("\(fileCount) files")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+
+            Text("~\(formatTokens(tokenCount)) tokens")
+                .foregroundStyle(.orange)
+                .font(.callout)
+                .fontWeight(.semibold)
+        }
+    }
+
+    private func fileTree(_ rootNode: FileNode) -> some View {
+        ScrollView {
+            FileTreeView(
+                node: rootNode,
+                totalTokens: rootNode.effectiveTokenCount,
+                showTokenMap: true
+            )
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: - Floating Actions
+
+    @ViewBuilder
+    private var copyPromptButton: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            if let errorMessage {
+                Text(errorMessage)
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .glassEffect(in: .capsule)
+            }
+
+            Button {
+                copyPrompt()
+            } label: {
+                Label(copied ? "Copied!" : "Copy Prompt",
+                      systemImage: copied ? "checkmark" : "doc.on.doc")
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 26))
+            .disabled(rootNode == nil)
+            .help(selectedURL?.lastPathComponent ?? "Copy prompt")
+        }
+        .padding(16)
+    }
+
+    // MARK: - Recents Persistence
+
+    private var sortedRecents: [RecentDirectory] {
+        recents.sorted { a, b in
+            if a.isStarred != b.isStarred { return a.isStarred }
+            return a.lastAccessed > b.lastAccessed
+        }
+    }
+
+    private func addRecent(_ url: URL) {
+        let path = url.path
+        let name = url.lastPathComponent
+        let bookmarkData = try? createBookmark(for: url)
+        if let index = recents.firstIndex(where: { $0.path == path }) {
+            recents[index].lastAccessed = Date()
+            recents[index].name = name
+            recents[index].bookmarkData = bookmarkData
+        } else {
+            recents.insert(
+                RecentDirectory(path: path, name: name, bookmarkData: bookmarkData),
+                at: 0
+            )
+            if recents.count > Constants.maximumRecents {
+                recents = Array(recents.prefix(Constants.maximumRecents))
+            }
+        }
+        saveRecents()
+    }
+
+    private func toggleStar(_ recent: RecentDirectory) {
+        if let index = recents.firstIndex(where: { $0.path == recent.path }) {
+            recents[index].isStarred.toggle()
+            saveRecents()
+        }
+    }
+
+    private func removeRecent(_ recent: RecentDirectory) {
+        recents.removeAll { $0.path == recent.path }
+        if selectedURL?.path == recent.path {
+            selectedURL = nil
+            rootNode = nil
+            gitDiffContent = nil
+        }
+        saveRecents()
+    }
+
+    private func loadRecents() {
+        guard let data = UserDefaults.standard.data(forKey: Constants.recentDirectoriesKey),
+              let decoded = try? JSONDecoder().decode([RecentDirectory].self, from: data) else { return }
+        recents = decoded
+    }
+
+    private func saveRecents() {
+        guard let data = try? JSONEncoder().encode(recents) else { return }
+        UserDefaults.standard.set(data, forKey: Constants.recentDirectoriesKey)
+    }
+
+    // MARK: - Actions
+
+    private func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openFolder(url)
+    }
+
+    private func openRecent(_ recent: RecentDirectory) {
+        do {
+            let url = try resolveRecentURL(for: recent)
+            openFolder(url)
+        } catch {
+            errorMessage = "Folder is no longer accessible. Re-add it from Choose Folder."
+        }
+    }
+
+    private func openFolder(_ url: URL) {
+        addRecent(url)
+        scan(url)
+    }
+
+    private func rescanSelectedFolder() {
+        guard let selectedURL else { return }
+        scan(selectedURL)
+    }
+
+    private func scan(_ url: URL) {
+        selectedURL = url
+        isScanning = true
+        errorMessage = nil
+        rootNode = nil
+        copied = false
+        gitDiffContent = nil
+
+        Task {
+            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            defer {
+                if didStartAccessing {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            do {
+                let node = try await RepoScanner.scan(
+                    directory: url,
+                    showHiddenFiles: settings.showHiddenFiles,
+                    followSymlinks: settings.followSymlinks
+                )
+
+                let diff = RepoScanner.gitDiff(in: url)
+
+                rootNode = node
+                gitDiffContent = diff
+                isScanning = false
+
+                applyFilters()
+                applySort()
+            } catch {
+                errorMessage = error.localizedDescription
+                isScanning = false
+            }
+        }
+    }
+
+    private func createBookmark(for url: URL) throws -> Data {
+        try url.bookmarkData(
+            options: [.withSecurityScope],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    private func resolveRecentURL(for recent: RecentDirectory) throws -> URL {
+        guard let bookmarkData = recent.bookmarkData else {
+            return URL(fileURLWithPath: recent.path)
+        }
+
+        var isStale = false
+        let url = try URL(
+            resolvingBookmarkData: bookmarkData,
+            options: [.withSecurityScope],
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        )
+
+        if isStale, let index = recents.firstIndex(where: { $0.path == recent.path }) {
+            recents[index].bookmarkData = try? createBookmark(for: url)
+            recents[index].lastAccessed = Date()
+            saveRecents()
+        }
+
+        return url
+    }
+
+    private func applyFilters() {
+        guard let rootNode else { return }
+        applyFilters(to: rootNode)
+    }
+
+    private func applyFilters(to node: FileNode) {
+        if node.isDirectory {
+            for child in node.children {
+                applyFilters(to: child)
+            }
+            node.isFilteredOut = node.children.allSatisfy { $0.isFilteredOut }
+        } else {
+            node.isFilteredOut = !settings.shouldIncludeFile(relativePath: node.relativePath)
+        }
+    }
+
+    private func applySort() {
+        rootNode?.sortChildren(by: settings.sortOrder)
+    }
+
+    private func copyPrompt() {
+        guard let rootNode else { return }
+        let prompt = settings.generatePrompt(
+            root: rootNode,
+            gitDiff: settings.includeGitDiff ? gitDiffContent : nil
+        )
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(prompt, forType: .string)
+        withAnimation { copied = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation { copied = false }
+        }
+    }
+
+    private func formatTokens(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK", Double(count) / 1_000)
+        }
+        return "\(count)"
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(previewState: ContentView.PreviewState.mock)
+}
+private extension ContentView.PreviewState {
+    static var mock: Self {
+        let selectedURL = URL(fileURLWithPath: "/Users/ryan/Projects/Repo2Prompt")
+        let rootNode = makeRootNode(basePath: selectedURL.path)
+        let settings = ScanSettings()
+        settings.includeGlob = "*.swift, *.md"
+        settings.excludeGlob = ".build, DerivedData, *.log"
+
+        let recents = [
+            RecentDirectory(path: "/Users/ryan/Projects/Data", name: "Data", isStarred: true),
+            RecentDirectory(path: selectedURL.path, name: "Repo2Prompt")
+        ]
+
+        return Self(
+            selectedURL: selectedURL,
+            rootNode: rootNode,
+            settings: settings,
+            recents: recents
+        )
+    }
+
+    static func makeRootNode(basePath: String) -> FileNode {
+        let root = directory("Repo2Prompt", path: "", basePath: basePath)
+        let sources = directory("Sources", path: "Sources", basePath: basePath)
+        let views = directory("Views", path: "Sources/Views", basePath: basePath)
+        let models = directory("Models", path: "Sources/Models", basePath: basePath)
+
+        let contentView = file(
+            "ContentView.swift",
+            path: "Sources/Views/ContentView.swift",
+            basePath: basePath,
+            tokens: 188
+        )
+        let treeView = file(
+            "TreeView.swift",
+            path: "Sources/Views/TreeView.swift",
+            basePath: basePath,
+            tokens: 72
+        )
+        let scanner = file(
+            "RepoScanner.swift",
+            path: "Sources/Models/RepoScanner.swift",
+            basePath: basePath,
+            tokens: 116
+        )
+        let settings = file(
+            "ScanSettings.swift",
+            path: "Sources/Models/ScanSettings.swift",
+            basePath: basePath,
+            tokens: 94
+        )
+        let readme = file(
+            "README.md",
+            path: "README.md",
+            basePath: basePath,
+            tokens: 28
+        )
+
+        connect(parent: root, child: sources)
+        connect(parent: sources, child: views)
+        connect(parent: sources, child: models)
+        connect(parent: views, child: contentView)
+        connect(parent: views, child: treeView)
+        connect(parent: models, child: scanner)
+        connect(parent: models, child: settings)
+        connect(parent: root, child: readme)
+
+        root.sortChildren(by: .nameAsc)
+        return root
+    }
+
+    static func connect(parent: FileNode, child: FileNode) {
+        child.parent = parent
+        parent.children.append(child)
+    }
+
+    static func directory(_ name: String, path: String, basePath: String) -> FileNode {
+        FileNode(
+            name: name,
+            relativePath: path,
+            absolutePath: basePath + (path.isEmpty ? "" : "/\(path)"),
+            isDirectory: true
+        )
+    }
+
+    static func file(_ name: String, path: String, basePath: String, tokens: Int) -> FileNode {
+        let node = FileNode(
+            name: name,
+            relativePath: path,
+            absolutePath: "\(basePath)/\(path)",
+            isDirectory: false
+        )
+        node.content = "// Preview content"
+        node.tokenCount = tokens
+        return node
+    }
 }

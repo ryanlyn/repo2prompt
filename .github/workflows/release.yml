@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Archive
+        run: >
+          xcodebuild archive
+          -scheme Repo2Prompt
+          -destination 'platform=macOS'
+          -configuration Release
+          -archivePath ${{ runner.temp }}/Repo2Prompt.xcarchive
+          CODE_SIGN_IDENTITY="-"
+          CODE_SIGNING_REQUIRED=NO
+
+      - name: Export app
+        run: |
+          APP_PATH="${{ runner.temp }}/Repo2Prompt.xcarchive/Products/Applications/Repo2Prompt.app"
+          cp -R "$APP_PATH" "${{ runner.temp }}/Repo2Prompt.app"
+
+      - name: Create DMG
+        run: |
+          DMG_PATH="${{ runner.temp }}/Repo2Prompt.dmg"
+          hdiutil create -volname "Repo2Prompt" \
+            -srcfolder "${{ runner.temp }}/Repo2Prompt.app" \
+            -ov -format UDZO \
+            "$DMG_PATH"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" "$DMG_PATH" \
+            --title "Repo2Prompt $TAG" \
+            --generate-notes

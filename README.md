@@ -16,4 +16,6 @@ Pick a folder, select the files you want, and hit **Copy Prompt**. The output in
 
 Download `Repo2Prompt.zip` from the [latest release](../../releases/latest), unzip, and drag to Applications.
 
+On first launch, macOS will block the app because it's not notarized. To open it, right-click the app and choose **Open**, then click **Open** again in the dialog.
+
 Requires macOS 26 or later.

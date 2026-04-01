@@ -1,8 +1,8 @@
 # Repo2Prompt
 
-A macOS app that turns a repository into a structured prompt you can paste into an LLM.
+A macOS app that turns a repository into a structured prompt for UI-gated models. Wanted something native without paying $15 per month. 
 
-Pick a folder, select the files you want, and hit **Copy Prompt**. The output includes a directory tree, file contents, and optionally a git diff - all wrapped in XML tags ready for Claude, ChatGPT, etc.
+<img width="994" height="632" alt="image" src="https://github.com/user-attachments/assets/030acd2f-412f-4c94-9904-8c08b48a47d3" />
 
 ## Features
 
@@ -16,6 +16,6 @@ Pick a folder, select the files you want, and hit **Copy Prompt**. The output in
 
 Download `Repo2Prompt.zip` from the [latest release](../../releases/latest), unzip, and drag to Applications.
 
-On first launch, macOS will block the app because it's not notarized. To open it, right-click the app and choose **Open**, then click **Open** again in the dialog.
+On first launch, macOS will block the app because it's not notarized. To open it, go to the `Privacy & Security` settings screen and elect to open it.
 
 Requires macOS 26 or later.

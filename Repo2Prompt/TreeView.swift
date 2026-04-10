@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsPanel: View {
     @Bindable var settings: ScanSettings
     var onRescanNeeded: () -> Void
+    @State private var showPrivacyPolicy = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -59,8 +60,68 @@ struct SettingsPanel: View {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...5)
             }
+
+            HStack(spacing: 12) {
+                Button("Privacy") {
+                    showPrivacyPolicy = true
+                }
+                .buttonStyle(.plain)
+
+                if let supportURL = URL(string: "https://github.com/ryanlyn/repo2prompt") {
+                    Link("Support", destination: supportURL)
+                        .buttonStyle(.plain)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .padding(12)
+        .sheet(isPresented: $showPrivacyPolicy) {
+            PrivacyPolicySheet()
+        }
+    }
+}
+
+private struct PrivacyPolicySheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text("""
+                Repo2Prompt processes folders you explicitly choose on your Mac to generate a copyable prompt.
+
+                Data use
+                - Repository contents are read locally on-device.
+                - Recent folders and security-scoped bookmarks are stored locally to reopen folders you picked.
+                - The app does not create accounts, transmit analytics, or sell data.
+
+                User control
+                - You choose which folder to open.
+                - You choose which files and folders remain selected.
+                - Copying a prompt happens only when you press Copy Prompt.
+
+                Storage
+                - Preferences and recent-folder metadata are stored using standard Apple system storage.
+                - Repository files are not uploaded by the app.
+
+                Support
+                Visit the project support page on GitHub for updates and contact details.
+                """)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding(20)
+            }
+            .navigationTitle("Privacy")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 520, minHeight: 360)
     }
 }
 

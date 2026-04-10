@@ -33,14 +33,22 @@ private func makeDir(
     _ name: String,
     path: String = "",
     children: [FileNode] = [],
-    date: Date? = nil
+    date: Date? = nil,
+    selected: Bool = true,
+    expanded: Bool = true,
+    ignored: Bool = false,
+    needsLazyLoad: Bool = false
 ) -> FileNode {
     let node = FileNode(
         name: name,
         relativePath: path.isEmpty ? name : path,
         absolutePath: "/test/\(path.isEmpty ? name : path)",
         isDirectory: true,
-        modificationDate: date
+        modificationDate: date,
+        isGitIgnored: ignored,
+        isSelected: selected,
+        isExpanded: expanded,
+        needsLazyLoad: needsLazyLoad
     )
     node.children = children
     for child in children {
@@ -63,6 +71,22 @@ private func makeSampleTree() -> FileNode {
     let root = makeDir("root", path: "", children: [src, readme])
     root.absolutePath // already set in makeDir
     return root
+}
+
+private func runGit(arguments: [String], in directory: URL) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    process.arguments = arguments
+    process.currentDirectoryURL = directory
+    try process.run()
+    process.waitUntilExit()
+    if process.terminationStatus != 0 {
+        throw NSError(
+            domain: "Repo2PromptTests",
+            code: Int(process.terminationStatus),
+            userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
+        )
+    }
 }
 
 // MARK: - FileNode: Initialization
@@ -165,8 +189,28 @@ struct FileNodeSelectionTests {
     }
 
     @Test func selectionStateEmptyDirReturnsNone() {
-        let dir = makeDir("src")
+        let dir = makeDir("src", selected: false)
         #expect(dir.selectionState == .none)
+    }
+
+    @Test func selectionStateEmptySelectedDirReturnsAll() {
+        let dir = makeDir("src")
+        #expect(dir.selectionState == .all)
+    }
+
+    @Test func gitIgnoredDirectoryStartsCollapsedAndDeselected() {
+        let dir = makeDir(
+            "node_modules",
+            path: "node_modules",
+            selected: false,
+            expanded: false,
+            ignored: true,
+            needsLazyLoad: true
+        )
+        #expect(dir.isGitIgnored == true)
+        #expect(dir.isExpanded == false)
+        #expect(dir.selectionState == .none)
+        #expect(dir.needsLazyLoad == true)
     }
 
     @Test func nestedDirectoryPropagation() {
@@ -986,6 +1030,34 @@ struct RepoScannerTests {
         #expect(files.count == 2)
     }
 
+    @Test func scanCompletesWithManyHiddenUntrackedFiles() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("repo2prompt_hidden_spam_\(UUID().uuidString)")
+        let hiddenDir = tmpDir.appendingPathComponent(".cache")
+
+        try FileManager.default.createDirectory(at: hiddenDir, withIntermediateDirectories: true)
+        try "visible".write(to: tmpDir.appendingPathComponent("visible.txt"), atomically: true, encoding: .utf8)
+
+        for index in 0..<4000 {
+            let fileURL = hiddenDir.appendingPathComponent("hidden-\(index).txt")
+            try "x".write(to: fileURL, atomically: true, encoding: .utf8)
+        }
+
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        try runGit(arguments: ["init", "-q"], in: tmpDir)
+
+        let root = try await RepoScanner.scan(
+            directory: tmpDir,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let files = root.selectedFiles
+        #expect(files.count == 1)
+        #expect(files[0].path == "visible.txt")
+    }
+
     @Test func scanSkipsBinaryFiles() async throws {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("repo2prompt_test_\(UUID().uuidString)")
@@ -1049,6 +1121,104 @@ struct RepoScannerTests {
         #expect(src?.parent === root)
         let file = src?.children.first
         #expect(file?.parent === src)
+    }
+
+    @Test func scanStartsDirectoriesCollapsed() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("repo2prompt_collapsed_\(UUID().uuidString)")
+        let nestedDir = tmpDir.appendingPathComponent("src/deep")
+
+        try FileManager.default.createDirectory(at: nestedDir, withIntermediateDirectories: true)
+        try "code".write(to: nestedDir.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let root = try await RepoScanner.scan(
+            directory: tmpDir,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let src = root.children.first { $0.name == "src" }
+        let deep = src?.children.first { $0.name == "deep" }
+
+        #expect(src?.isExpanded == false)
+        #expect(deep?.isExpanded == false)
+    }
+
+    @Test func scanAddsGitIgnoredDirectoriesAsCollapsedPlaceholders() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("repo2prompt_gitignore_\(UUID().uuidString)")
+        let ignoredDir = tmpDir.appendingPathComponent("node_modules/pkg")
+        let srcDir = tmpDir.appendingPathComponent("src")
+
+        try FileManager.default.createDirectory(at: ignoredDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try "node_modules/\n".write(to: tmpDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "func main() {}".write(to: srcDir.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+        try "console.log('ignored')".write(to: ignoredDir.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        try runGit(arguments: ["init", "-q"], in: tmpDir)
+
+        let root = try await RepoScanner.scan(
+            directory: tmpDir,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let ignoredNode = root.children.first { $0.name == "node_modules" }
+        #expect(ignoredNode != nil)
+        #expect(ignoredNode?.isGitIgnored == true)
+        #expect(ignoredNode?.isSelected == false)
+        #expect(ignoredNode?.isExpanded == false)
+        #expect(ignoredNode?.needsLazyLoad == true)
+        #expect(root.effectiveTokenCount > 0)
+        #expect(root.selectedFiles.allSatisfy { !$0.path.contains("node_modules/") })
+    }
+
+    @Test func materializeIgnoredDirectoryLoadsContentsOnDemand() async throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("repo2prompt_materialize_\(UUID().uuidString)")
+        let ignoredDir = tmpDir.appendingPathComponent("node_modules/pkg")
+
+        try FileManager.default.createDirectory(at: ignoredDir, withIntermediateDirectories: true)
+        try "node_modules/\n".write(to: tmpDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "console.log('ignored')".write(to: ignoredDir.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
+
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        try runGit(arguments: ["init", "-q"], in: tmpDir)
+
+        let root = try await RepoScanner.scan(
+            directory: tmpDir,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        guard let ignoredNode = root.children.first(where: { $0.name == "node_modules" }) else {
+            throw NSError(
+                domain: "Repo2PromptTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Missing ignored directory placeholder"]
+            )
+        }
+
+        ignoredNode.isSelected = true
+        try await RepoScanner.materializeIgnoredDirectory(
+            ignoredNode,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let pkg = ignoredNode.children.first { $0.name == "pkg" }
+        let index = pkg?.children.first { $0.name == "index.js" }
+
+        #expect(ignoredNode.needsLazyLoad == false)
+        #expect(index?.content == "console.log('ignored')")
+        #expect(index?.isSelected == true)
+        #expect(ignoredNode.selectedFiles.contains { $0.path == "node_modules/pkg/index.js" })
     }
 
     @Test func gitDiffReturnsValueOnGitRepo() {

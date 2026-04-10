@@ -236,7 +236,9 @@ struct ContentView: View {
             FileTreeView(
                 node: rootNode,
                 totalTokens: rootNode.effectiveTokenCount,
-                showTokenMap: true
+                showTokenMap: settings.showTokenMap,
+                onToggleSelection: toggleSelection,
+                onToggleExpansion: toggleExpansion
             )
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -436,7 +438,7 @@ struct ContentView: View {
             for child in node.children {
                 applyFilters(to: child)
             }
-            node.isFilteredOut = node.children.allSatisfy { $0.isFilteredOut }
+            node.isFilteredOut = node.needsLazyLoad ? false : node.children.allSatisfy { $0.isFilteredOut }
         } else {
             node.isFilteredOut = !settings.shouldIncludeFile(relativePath: node.relativePath)
         }
@@ -458,6 +460,63 @@ struct ContentView: View {
         withAnimation { copied = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             withAnimation { copied = false }
+        }
+    }
+
+    private func toggleSelection(_ node: FileNode) {
+        let shouldSelect = node.selectionState != .all
+
+        guard shouldSelect, node.isDirectory, node.needsLazyLoad else {
+            node.toggle()
+            applyFilters()
+            applySort()
+            return
+        }
+
+        materializeIgnoredDirectory(node) {
+            node.isSelected = true
+            applyFilters()
+            applySort()
+        }
+    }
+
+    private func toggleExpansion(_ node: FileNode) {
+        guard node.isDirectory else { return }
+
+        guard node.needsLazyLoad, !node.isExpanded else {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                node.isExpanded.toggle()
+            }
+            return
+        }
+
+        materializeIgnoredDirectory(node) {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                node.isExpanded = true
+            }
+            applyFilters()
+            applySort()
+        }
+    }
+
+    private func materializeIgnoredDirectory(_ node: FileNode, completion: @escaping () -> Void) {
+        guard !node.isLoadingChildren else { return }
+
+        node.isLoadingChildren = true
+
+        Task {
+            do {
+                try await RepoScanner.materializeIgnoredDirectory(
+                    node,
+                    showHiddenFiles: settings.showHiddenFiles,
+                    followSymlinks: settings.followSymlinks
+                )
+                node.isLoadingChildren = false
+                completion()
+            } catch {
+                node.isLoadingChildren = false
+                errorMessage = error.localizedDescription
+            }
         }
     }
 

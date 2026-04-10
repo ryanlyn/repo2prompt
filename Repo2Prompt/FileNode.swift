@@ -27,12 +27,16 @@ final class FileNode: Identifiable {
     let absolutePath: String
     let isDirectory: Bool
     let modificationDate: Date?
+    let isGitIgnored: Bool
 
     var content: String?
     var tokenCount: Int = 0
 
     var children: [FileNode] = []
     weak var parent: FileNode?
+    var isExpanded: Bool
+    var needsLazyLoad: Bool
+    var isLoadingChildren: Bool = false
 
     var isSelected: Bool = true {
         didSet {
@@ -48,6 +52,7 @@ final class FileNode: Identifiable {
 
     var selectionState: SelectionState {
         if !isDirectory { return isSelected ? .all : .none }
+        if children.isEmpty { return isSelected ? .all : .none }
         let visible = children.filter { !$0.isFilteredOut }
         if visible.isEmpty { return .none }
         let allSelected = visible.allSatisfy { $0.selectionState == .all }
@@ -82,12 +87,20 @@ final class FileNode: Identifiable {
     }
 
     init(name: String, relativePath: String, absolutePath: String,
-         isDirectory: Bool, modificationDate: Date? = nil) {
+         isDirectory: Bool, modificationDate: Date? = nil,
+         isGitIgnored: Bool = false,
+         isSelected: Bool = true,
+         isExpanded: Bool = true,
+         needsLazyLoad: Bool = false) {
         self.name = name
         self.relativePath = relativePath
         self.absolutePath = absolutePath
         self.isDirectory = isDirectory
         self.modificationDate = modificationDate
+        self.isGitIgnored = isGitIgnored
+        self.isSelected = isSelected
+        self.isExpanded = isExpanded
+        self.needsLazyLoad = needsLazyLoad
     }
 
     // MARK: - Tree Operations

@@ -70,53 +70,82 @@ struct FileTreeRow: View {
     @Bindable var node: FileNode
     var totalTokens: Int
     var showTokenMap: Bool
+    var onToggleSelection: (FileNode) -> Void
+    var onToggleExpansion: (FileNode) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
-            // Checkbox
+            if node.isDirectory {
+                Button {
+                    onToggleExpansion(node)
+                } label: {
+                    Image(systemName: node.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Color.clear
+                    .frame(width: 12, height: 12)
+            }
+
             Button {
-                node.toggle()
+                onToggleSelection(node)
             } label: {
                 Image(systemName: checkboxImage)
                     .foregroundStyle(node.selectionState == .some ? .secondary : .primary)
             }
             .buttonStyle(.plain)
 
-            // Icon
             Image(systemName: node.isDirectory ? "folder.fill" : fileIcon(for: node.name))
                 .foregroundStyle(node.isDirectory ? .blue : .secondary)
                 .frame(width: 16)
 
-            // Name
             Text(node.name)
                 .font(.system(.body, design: .monospaced))
                 .lineLimit(1)
 
-            if !node.isDirectory && showTokenMap && totalTokens > 0 {
-                Spacer()
+            if node.isGitIgnored {
+                Text("gitignored")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
-                let fraction = Double(node.tokenCount) / Double(max(totalTokens, 1))
-                let pct = fraction * 100
+            if node.isLoadingChildren {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if showTokenSummary {
+                Spacer()
 
                 GeometryReader { geo in
                     RoundedRectangle(cornerRadius: 2)
                         .fill(.orange.opacity(0.3))
-                        .frame(width: geo.size.width * min(fraction, 1.0))
+                        .frame(width: geo.size.width * min(summaryFraction, 1.0))
                 }
                 .frame(width: 80, height: 12)
 
-                Text(String(format: "%.1f%%", pct))
+                Text(String(format: "%.1f%%", summaryFraction * 100))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .frame(width: 45, alignment: .trailing)
 
-                Text(formatTokens(node.tokenCount))
+                Text(formatTokens(summaryTokenCount))
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .frame(width: 45, alignment: .trailing)
+            } else {
+                Spacer(minLength: 0)
             }
         }
-        .opacity(node.isFilteredOut ? 0.4 : 1.0)
+        .opacity(rowOpacity)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard node.isDirectory else { return }
+            onToggleExpansion(node)
+        }
     }
 
     private var checkboxImage: String {
@@ -144,6 +173,28 @@ struct FileTreeRow: View {
         if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
         return "\(count)"
     }
+
+    private var showTokenSummary: Bool {
+        guard showTokenMap, totalTokens > 0 else { return false }
+        if node.isDirectory {
+            return !node.isExpanded && summaryTokenCount > 0
+        }
+        return true
+    }
+
+    private var summaryTokenCount: Int {
+        node.isDirectory ? node.effectiveTokenCount : node.tokenCount
+    }
+
+    private var summaryFraction: Double {
+        Double(summaryTokenCount) / Double(max(totalTokens, 1))
+    }
+
+    private var rowOpacity: Double {
+        if node.isFilteredOut { return 0.4 }
+        if node.isGitIgnored && node.selectionState == .none { return 0.72 }
+        return 1.0
+    }
 }
 
 // MARK: - Recursive File Tree
@@ -153,33 +204,33 @@ struct FileTreeView: View {
     var totalTokens: Int
     var showTokenMap: Bool
     var depth: Int = 0
-
-    @State private var isExpanded: Bool = true
+    var onToggleSelection: (FileNode) -> Void
+    var onToggleExpansion: (FileNode) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if depth > 0 {
-                FileTreeRow(node: node, totalTokens: totalTokens, showTokenMap: showTokenMap)
+                FileTreeRow(
+                    node: node,
+                    totalTokens: totalTokens,
+                    showTokenMap: showTokenMap,
+                    onToggleSelection: onToggleSelection,
+                    onToggleExpansion: onToggleExpansion
+                )
                     .padding(.leading, CGFloat(depth - 1) * 20)
                     .padding(.vertical, 2)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if node.isDirectory {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                isExpanded.toggle()
-                            }
-                        }
-                    }
             }
 
-            if node.isDirectory && (isExpanded || depth == 0) {
+            if node.isDirectory && (node.isExpanded || depth == 0) {
                 ForEach(node.children) { child in
                     if !child.isFilteredOut {
                         FileTreeView(
                             node: child,
                             totalTokens: totalTokens,
                             showTokenMap: showTokenMap,
-                            depth: depth + 1
+                            depth: depth + 1,
+                            onToggleSelection: onToggleSelection,
+                            onToggleExpansion: onToggleExpansion
                         )
                     }
                 }

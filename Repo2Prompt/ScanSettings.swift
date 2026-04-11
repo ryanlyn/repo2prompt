@@ -3,23 +3,93 @@ import Foundation
 @Observable
 final class ScanSettings {
     // Glob filters
-    var includeGlob: String = ""
-    var excludeGlob: String = ""
+    var includeGlob: String = "" { didSet { persist() } }
+    var excludeGlob: String = "" { didSet { persist() } }
 
     // Output options
-    var showLineNumbers: Bool = false
-    var includeGitDiff: Bool = false
-    var showHiddenFiles: Bool = false
-    var followSymlinks: Bool = false
-    var useAbsolutePaths: Bool = false
-    var fullDirectoryTree: Bool = false
-    var instruction: String = ""
+    var showLineNumbers: Bool = false { didSet { persist() } }
+    var showHiddenFiles: Bool = false { didSet { persist() } }
+    var followSymlinks: Bool = false { didSet { persist() } }
+    var useAbsolutePaths: Bool = false { didSet { persist() } }
+    var fullDirectoryTree: Bool = false { didSet { persist() } }
+    var instruction: String = "" { didSet { persist() } }
 
     // Sort
-    var sortOrder: SortOrder = .tokensDesc
+    var sortOrder: SortOrder = .tokensDesc { didSet { persist() } }
 
     // Token map visibility
-    var showTokenMap: Bool = true
+    var showTokenMap: Bool = true { didSet { persist() } }
+
+    // MARK: - Persistence
+
+    static let persistenceKey = "ScanSettings.v1"
+    private let defaults: UserDefaults?
+    private var isLoading = false
+
+    private struct Snapshot: Codable {
+        var includeGlob: String
+        var excludeGlob: String
+        var showLineNumbers: Bool
+        var showHiddenFiles: Bool
+        var followSymlinks: Bool
+        var useAbsolutePaths: Bool
+        var fullDirectoryTree: Bool
+        var instruction: String
+        var sortOrderRawValue: String
+        var showTokenMap: Bool
+    }
+
+    init(defaults: UserDefaults? = .standard) {
+        self.defaults = defaults
+        load()
+    }
+
+    private func load() {
+        guard let defaults else { return }
+        guard let data = defaults.data(forKey: Self.persistenceKey) else { return }
+        do {
+            let snapshot = try JSONDecoder().decode(Snapshot.self, from: data)
+            isLoading = true
+            defer { isLoading = false }
+            includeGlob = snapshot.includeGlob
+            excludeGlob = snapshot.excludeGlob
+            showLineNumbers = snapshot.showLineNumbers
+            showHiddenFiles = snapshot.showHiddenFiles
+            followSymlinks = snapshot.followSymlinks
+            useAbsolutePaths = snapshot.useAbsolutePaths
+            fullDirectoryTree = snapshot.fullDirectoryTree
+            instruction = snapshot.instruction
+            if let order = SortOrder(rawValue: snapshot.sortOrderRawValue) {
+                sortOrder = order
+            }
+            showTokenMap = snapshot.showTokenMap
+        } catch {
+            FileHandle.standardError.write(Data("ScanSettings: failed to decode persisted settings - \(error)\n".utf8))
+        }
+    }
+
+    private func persist() {
+        if isLoading { return }
+        guard let defaults else { return }
+        let snapshot = Snapshot(
+            includeGlob: includeGlob,
+            excludeGlob: excludeGlob,
+            showLineNumbers: showLineNumbers,
+            showHiddenFiles: showHiddenFiles,
+            followSymlinks: followSymlinks,
+            useAbsolutePaths: useAbsolutePaths,
+            fullDirectoryTree: fullDirectoryTree,
+            instruction: instruction,
+            sortOrderRawValue: sortOrder.rawValue,
+            showTokenMap: showTokenMap
+        )
+        do {
+            let data = try JSONEncoder().encode(snapshot)
+            defaults.set(data, forKey: Self.persistenceKey)
+        } catch {
+            FileHandle.standardError.write(Data("ScanSettings: failed to encode settings - \(error)\n".utf8))
+        }
+    }
 
     // MARK: - Glob Matching
 
@@ -30,21 +100,25 @@ final class ScanSettings {
         let filename = (relativePath as NSString).lastPathComponent
 
         for pat in excludePatterns {
-            if Self.matchesGlob(relativePath, pattern: pat) ||
-               Self.matchesGlob(filename, pattern: pat) {
+            if Self.matches(pat, path: relativePath, filename: filename) {
                 return false
             }
         }
 
         if !includePatterns.isEmpty {
             let matchesAny = includePatterns.contains { pat in
-                Self.matchesGlob(relativePath, pattern: pat) ||
-                Self.matchesGlob(filename, pattern: pat)
+                Self.matches(pat, path: relativePath, filename: filename)
             }
             if !matchesAny { return false }
         }
 
         return true
+    }
+
+    private static func matches(_ pattern: String, path: String, filename: String) -> Bool {
+        if matchesGlob(path, pattern: pattern) { return true }
+        if pattern.contains("/") { return false }
+        return matchesGlob(filename, pattern: pattern)
     }
 
     static func matchesGlob(_ path: String, pattern: String) -> Bool {
@@ -55,18 +129,56 @@ final class ScanSettings {
     static func globToRegex(_ glob: String) -> String {
         var regex = "^"
         var i = glob.startIndex
+        var inClass = false
+
         while i < glob.endIndex {
             let c = glob[i]
+
+            if inClass {
+                switch c {
+                case "]":
+                    regex += "]"
+                    inClass = false
+                case "\\":
+                    regex += "\\\\"
+                default:
+                    if "\\^".contains(c) {
+                        regex += "\\\(c)"
+                    } else {
+                        regex += String(c)
+                    }
+                }
+                i = glob.index(after: i)
+                continue
+            }
+
             switch c {
             case "*":
                 let next = glob.index(after: i)
                 if next < glob.endIndex && glob[next] == "*" {
-                    regex += ".*"
-                    i = glob.index(after: next)
-                    if i < glob.endIndex && glob[i] == "/" {
-                        i = glob.index(after: i)
+                    let afterStars = glob.index(after: next)
+                    let atStart = (i == glob.startIndex)
+                    let prevIsSlash = !atStart && (glob[glob.index(before: i)] == "/")
+                    let nextIsSlash = (afterStars < glob.endIndex) && (glob[afterStars] == "/")
+                    let atEnd = (afterStars == glob.endIndex)
+
+                    if atStart && nextIsSlash {
+                        regex += "(?:.*/)?"
+                        i = glob.index(after: afterStars)
+                        continue
+                    } else if prevIsSlash && nextIsSlash {
+                        regex += "(?:.*/)?"
+                        i = glob.index(after: afterStars)
+                        continue
+                    } else if prevIsSlash && atEnd {
+                        regex += ".*"
+                        i = afterStars
+                        continue
+                    } else {
+                        regex += ".*"
+                        i = afterStars
+                        continue
                     }
-                    continue
                 } else {
                     regex += "[^/]*"
                 }
@@ -81,9 +193,18 @@ final class ScanSettings {
             case ",":
                 regex += "|"
             case "[":
-                regex += "["
+                let next = glob.index(after: i)
+                if next < glob.endIndex && glob[next] == "!" {
+                    regex += "[^"
+                    i = glob.index(after: next)
+                    inClass = true
+                    continue
+                } else {
+                    regex += "["
+                    inClass = true
+                }
             case "]":
-                regex += "]"
+                regex += "\\]"
             default:
                 if "\\^$.|+()".contains(c) {
                     regex += "\\\(c)"
@@ -145,7 +266,7 @@ final class ScanSettings {
 
     // MARK: - Prompt Generation
 
-    func generatePrompt(root: FileNode, gitDiff: String?) -> String {
+    func generatePrompt(root: FileNode) -> String {
         var output = ""
 
         let treeText = root.renderTree(selectedOnly: !fullDirectoryTree)
@@ -163,10 +284,6 @@ final class ScanSettings {
             output += "<file path=\"\(displayPath)\">\n\(content)\n</file>\n\n"
         }
 
-        if includeGitDiff, let diff = gitDiff, !diff.isEmpty {
-            output += "<git_diff>\n\(diff)\n</git_diff>\n\n"
-        }
-
         let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedInstruction.isEmpty {
             output += "<instruction>\n\(trimmedInstruction)\n</instruction>\n"
@@ -179,8 +296,9 @@ final class ScanSettings {
         let lines = content.split(separator: "\n", omittingEmptySubsequences: false)
         let width = String(lines.count).count
         return lines.enumerated().map { i, line in
-            let num = String(i + 1).padding(toLength: width, withPad: " ", startingAt: 0)
-            return "\(num) | \(line)"
+            let numString = String(i + 1)
+            let padding = String(repeating: " ", count: width - numString.count)
+            return "\(padding)\(numString) | \(line)"
         }.joined(separator: "\n")
     }
 }

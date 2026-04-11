@@ -28,7 +28,6 @@ struct SettingsPanel: View {
             // Toggles row 1
             HStack(spacing: 16) {
                 Toggle("Line numbers", isOn: $settings.showLineNumbers)
-                Toggle("Git diff", isOn: $settings.includeGitDiff)
                 Toggle("Absolute paths", isOn: $settings.useAbsolutePaths)
                 Toggle("Full tree", isOn: $settings.fullDirectoryTree)
             }
@@ -85,29 +84,34 @@ struct SettingsPanel: View {
 private struct PrivacyPolicySheet: View {
     @Environment(\.dismiss) private var dismiss
 
+    private let policyURL = URL(string: "https://github.com/ryanlyn/Repo2Prompt/blob/main/PRIVACY_POLICY.md")!
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                Text("""
-                Repo2Prompt processes folders you explicitly choose on your Mac to generate a copyable prompt.
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Repo2Prompt processes folders you explicitly choose on your Mac to generate a copyable prompt. Everything happens locally on your device.")
 
-                Data use
-                - Repository contents are read locally on-device.
-                - Recent folders and security-scoped bookmarks are stored locally to reopen folders you picked.
-                - The app does not create accounts, transmit analytics, or sell data.
+                    Text("Summary")
+                        .font(.headline)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("- Repository contents are read locally, on-device.")
+                        Text("- No accounts, no analytics, no data transmission.")
+                        Text("- Recent folders and bookmarks are stored locally so you can reopen folders you picked.")
+                        Text("- Copying a prompt happens only when you press Copy Prompt.")
+                    }
 
-                User control
-                - You choose which folder to open.
-                - You choose which files and folders remain selected.
-                - Copying a prompt happens only when you press Copy Prompt.
+                    Divider()
 
-                Storage
-                - Preferences and recent-folder metadata are stored using standard Apple system storage.
-                - Repository files are not uploaded by the app.
-
-                Support
-                Visit the project support page on GitHub for updates and contact details.
-                """)
+                    Text("The full privacy policy is maintained on GitHub:")
+                    Link(destination: policyURL) {
+                        Text(policyURL.absoluteString)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    Button("Open Privacy Policy") {
+                        NSWorkspace.shared.open(policyURL)
+                    }
+                }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
                 .padding(20)
@@ -159,54 +163,59 @@ struct FileTreeRow: View {
             }
             .buttonStyle(.plain)
 
-            Image(systemName: node.isDirectory ? "folder.fill" : fileIcon(for: node.name))
-                .foregroundStyle(node.isDirectory ? .blue : .secondary)
-                .frame(width: 16)
+            HStack(spacing: 4) {
+                Image(systemName: node.isDirectory ? "folder.fill" : fileIcon(for: node.name))
+                    .foregroundStyle(node.isDirectory ? .blue : .secondary)
+                    .frame(width: 16)
 
-            Text(node.name)
-                .font(.system(.body, design: .monospaced))
-                .lineLimit(1)
+                Text(node.name)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
 
-            if node.isGitIgnored {
-                Text("gitignored")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            if node.isLoadingChildren {
-                ProgressView()
-                    .controlSize(.small)
-            }
-
-            if showTokenSummary {
-                Spacer()
-
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(.orange.opacity(0.3))
-                        .frame(width: geo.size.width * min(summaryFraction, 1.0))
+                if node.isGitIgnored {
+                    Text("gitignored")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
-                .frame(width: 80, height: 12)
 
-                Text(String(format: "%.1f%%", summaryFraction * 100))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 45, alignment: .trailing)
+                if node.isLoadingChildren {
+                    ProgressView()
+                        .controlSize(.small)
+                }
 
-                Text(formatTokens(summaryTokenCount))
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .frame(width: 45, alignment: .trailing)
-            } else {
-                Spacer(minLength: 0)
+                if showTokenSummary {
+                    Spacer()
+
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(.orange.opacity(0.3))
+                            .frame(width: geo.size.width * min(summaryFraction, 1.0))
+                    }
+                    .frame(width: 80, height: 12)
+
+                    Text(String(format: "%.1f%%", summaryFraction * 100))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 45, alignment: .trailing)
+
+                    Text(formatTokens(summaryTokenCount))
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .frame(width: 45, alignment: .trailing)
+                } else {
+                    Spacer(minLength: 0)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if node.isDirectory {
+                    onToggleExpansion(node)
+                } else {
+                    onToggleSelection(node)
+                }
             }
         }
         .opacity(rowOpacity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            guard node.isDirectory else { return }
-            onToggleExpansion(node)
-        }
     }
 
     private var checkboxImage: String {
@@ -223,6 +232,14 @@ struct FileTreeRow: View {
         case "swift": return "swift"
         case "js", "ts", "jsx", "tsx": return "curlybraces"
         case "py": return "chevron.left.forwardslash.chevron.right"
+        case "go", "rs", "kt", "java", "rb", "php", "dart", "lua":
+            return "curlybraces"
+        case "c", "cpp", "h":
+            return "chevron.left.forwardslash.chevron.right"
+        case "html", "css", "scss":
+            return "chevron.left.forwardslash.chevron.right"
+        case "sh": return "terminal"
+        case "sql": return "cylinder"
         case "md", "txt": return "doc.text"
         case "json", "yaml", "yml", "toml": return "gearshape"
         default: return "doc"
@@ -282,7 +299,7 @@ struct FileTreeView: View {
                     .padding(.vertical, 2)
             }
 
-            if node.isDirectory && (node.isExpanded || depth == 0) {
+            if node.isDirectory && node.isExpanded {
                 ForEach(node.children) { child in
                     if !child.isFilteredOut {
                         FileTreeView(

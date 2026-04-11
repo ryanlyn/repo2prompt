@@ -26,20 +26,16 @@ struct ContentView: View {
         let recents: [RecentDirectory]
     }
 
-    #if DEBUG
-    static let defaultURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    #endif
-
     @State private var selectedURL: URL?
     @State private var rootNode: FileNode?
     @State private var isScanning = false
     @State private var errorMessage: String?
     @State private var copied = false
     @State private var showSettings = true
-    @State private var gitDiffContent: String?
     @State private var settings = ScanSettings()
     @State private var recents: [RecentDirectory] = []
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
+    @State private var currentScanTask: Task<Void, Never>?
 
     private var isRunningInPreview: Bool {
         let environment = ProcessInfo.processInfo.environment
@@ -62,7 +58,6 @@ struct ContentView: View {
         _errorMessage = State(initialValue: nil)
         _copied = State(initialValue: false)
         _showSettings = State(initialValue: true)
-        _gitDiffContent = State(initialValue: nil)
         _settings = State(initialValue: ScanSettings())
         _recents = State(initialValue: [])
         _sidebarVisibility = State(initialValue: .all)
@@ -75,7 +70,6 @@ struct ContentView: View {
         _errorMessage = State(initialValue: nil)
         _copied = State(initialValue: false)
         _showSettings = State(initialValue: true)
-        _gitDiffContent = State(initialValue: nil)
         _settings = State(initialValue: previewState.settings)
         _recents = State(initialValue: previewState.recents)
         _sidebarVisibility = State(initialValue: .all)
@@ -92,14 +86,30 @@ struct ContentView: View {
             guard !isRunningInPreview else { return }
             loadRecents()
             #if DEBUG
-            let url = Self.defaultURL
-            scan(url)
-            addRecent(url)
+            let cwd = FileManager.default.currentDirectoryPath
+            let home = NSHomeDirectory()
+            let hasGit = FileManager.default.fileExists(atPath: "\(cwd)/.git")
+            let inDevDir = cwd.hasPrefix("\(home)/dev")
+            if hasGit || inDevDir {
+                let url = URL(fileURLWithPath: cwd)
+                scan(url)
+                addRecent(url)
+            }
             #endif
         }
         .onChange(of: settings.includeGlob) { _, _ in applyFilters() }
         .onChange(of: settings.excludeGlob) { _, _ in applyFilters() }
         .onChange(of: settings.sortOrder) { _, _ in applySort() }
+        .onReceive(NotificationCenter.default.publisher(for: .repo2PromptOpenFolder)) { _ in
+            pickFolder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .repo2PromptCopyPrompt)) { _ in
+            guard rootNode != nil else { return }
+            copyPrompt()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .repo2PromptToggleSettings)) { _ in
+            withAnimation { showSettings.toggle() }
+        }
     }
 
     // MARK: - Sidebar
@@ -134,24 +144,24 @@ struct ContentView: View {
     }
 
     private func recentRow(_ recent: RecentDirectory) -> some View {
-        Button {
-            openRecent(recent)
-        } label: {
-            HStack {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(.blue)
-                Text(recent.name)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                Button {
-                    toggleStar(recent)
-                } label: {
-                    Image(systemName: recent.isStarred ? "star.fill" : "star")
-                        .foregroundStyle(recent.isStarred ? .yellow : .secondary)
-                }
-                .buttonStyle(.plain)
+        HStack {
+            Image(systemName: "folder.fill")
+                .foregroundStyle(.blue)
+            Text(recent.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            Button {
+                toggleStar(recent)
+            } label: {
+                Image(systemName: recent.isStarred ? "star.fill" : "star")
+                    .foregroundStyle(recent.isStarred ? .yellow : .secondary)
             }
+            .buttonStyle(.plain)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            openRecent(recent)
         }
         .contextMenu {
             Button(recent.isStarred ? "Unstar" : "Star") {
@@ -314,7 +324,6 @@ struct ContentView: View {
         if selectedURL?.path == recent.path {
             selectedURL = nil
             rootNode = nil
-            gitDiffContent = nil
         }
         saveRecents()
     }
@@ -342,15 +351,31 @@ struct ContentView: View {
     }
 
     private func openRecent(_ recent: RecentDirectory) {
+        if recent.bookmarkData == nil {
+            reauthorizeRecent(recent)
+            return
+        }
         do {
             let url = try resolveRecentURL(for: recent)
             openFolder(url)
         } catch {
-            errorMessage = "Folder is no longer accessible. Re-add it from Choose Folder."
+            reauthorizeRecent(recent)
         }
     }
 
+    private func reauthorizeRecent(_ recent: RecentDirectory) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: recent.path)
+        panel.message = "Re-grant access to \(recent.name)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        openFolder(url)
+    }
+
     private func openFolder(_ url: URL) {
+        errorMessage = nil
         addRecent(url)
         scan(url)
     }
@@ -361,14 +386,23 @@ struct ContentView: View {
     }
 
     private func scan(_ url: URL) {
+        currentScanTask?.cancel()
+
         selectedURL = url
         isScanning = true
         errorMessage = nil
         rootNode = nil
         copied = false
-        gitDiffContent = nil
 
-        Task {
+        var thisTask: Task<Void, Never>?
+        let task = Task {
+            defer {
+                if currentScanTask == thisTask {
+                    isScanning = false
+                    currentScanTask = nil
+                }
+            }
+
             let didStartAccessing = url.startAccessingSecurityScopedResource()
             defer {
                 if didStartAccessing {
@@ -377,25 +411,25 @@ struct ContentView: View {
             }
 
             do {
-                let node = try await RepoScanner.scan(
+                let node = try await FolderScanner.scan(
                     directory: url,
                     showHiddenFiles: settings.showHiddenFiles,
                     followSymlinks: settings.followSymlinks
                 )
 
-                let diff = RepoScanner.gitDiff(in: url)
+                if Task.isCancelled { return }
 
                 rootNode = node
-                gitDiffContent = diff
-                isScanning = false
-
+                errorMessage = nil
                 applyFilters()
                 applySort()
             } catch {
+                if Task.isCancelled { return }
                 errorMessage = error.localizedDescription
-                isScanning = false
             }
         }
+        thisTask = task
+        currentScanTask = task
     }
 
     private func createBookmark(for url: URL) throws -> Data {
@@ -450,10 +484,17 @@ struct ContentView: View {
 
     private func copyPrompt() {
         guard let rootNode else { return }
-        let prompt = settings.generatePrompt(
-            root: rootNode,
-            gitDiff: settings.includeGitDiff ? gitDiffContent : nil
-        )
+        let prompt = settings.generatePrompt(root: rootNode)
+
+        if prompt.count > 5 * 1024 * 1024 {
+            let alert = NSAlert()
+            alert.messageText = "Large prompt"
+            alert.informativeText = "This prompt is \(prompt.count / 1024 / 1024) MB. Copy to clipboard anyway?"
+            alert.addButton(withTitle: "Copy")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(prompt, forType: .string)
@@ -504,9 +545,18 @@ struct ContentView: View {
 
         node.isLoadingChildren = true
 
+        let scopedURL = selectedURL
+
         Task {
+            let didStartAccessing = scopedURL?.startAccessingSecurityScopedResource() ?? false
+            defer {
+                if didStartAccessing {
+                    scopedURL?.stopAccessingSecurityScopedResource()
+                }
+            }
+
             do {
-                try await RepoScanner.materializeIgnoredDirectory(
+                try await FolderScanner.materializeIgnoredDirectory(
                     node,
                     showHiddenFiles: settings.showHiddenFiles,
                     followSymlinks: settings.followSymlinks
@@ -573,8 +623,8 @@ private extension ContentView.PreviewState {
             tokens: 72
         )
         let scanner = file(
-            "RepoScanner.swift",
-            path: "Sources/Models/RepoScanner.swift",
+            "FolderScanner.swift",
+            path: "Sources/Models/FolderScanner.swift",
             basePath: basePath,
             tokens: 116
         )

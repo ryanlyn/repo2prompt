@@ -73,22 +73,6 @@ private func makeSampleTree() -> FileNode {
     return root
 }
 
-private func runGit(arguments: [String], in directory: URL) throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-    process.arguments = arguments
-    process.currentDirectoryURL = directory
-    try process.run()
-    process.waitUntilExit()
-    if process.terminationStatus != 0 {
-        throw NSError(
-            domain: "Repo2PromptTests",
-            code: Int(process.terminationStatus),
-            userInfo: [NSLocalizedDescriptionKey: "git \(arguments.joined(separator: " ")) failed"]
-        )
-    }
-}
-
 // MARK: - FileNode: Initialization
 
 @Suite("FileNode Initialization")
@@ -606,6 +590,32 @@ struct GlobToRegexTests {
         #expect("src/main.swift".range(of: regex, options: .regularExpression) != nil)
         #expect("src/deep/main.swift".range(of: regex, options: .regularExpression) != nil)
     }
+
+    @Test func doubleStarInMiddleMatchesZeroOrMoreComponents() {
+        let regex = ScanSettings.globToRegex("**/.git/**")
+        #expect(".git/config".range(of: regex, options: .regularExpression) != nil)
+        #expect("a/b/.git/config".range(of: regex, options: .regularExpression) != nil)
+        #expect("src/main.swift".range(of: regex, options: .regularExpression) == nil)
+    }
+
+    @Test func negatedCharacterClass() {
+        let regex = ScanSettings.globToRegex("[!abc].txt")
+        #expect("d.txt".range(of: regex, options: .regularExpression) != nil)
+        #expect("a.txt".range(of: regex, options: .regularExpression) == nil)
+        #expect("b.txt".range(of: regex, options: .regularExpression) == nil)
+    }
+
+    @Test func closingBracketOutsideClassEscaped() {
+        let regex = ScanSettings.globToRegex("foo].txt")
+        #expect("foo].txt".range(of: regex, options: .regularExpression) != nil)
+        #expect("foo.txt".range(of: regex, options: .regularExpression) == nil)
+    }
+
+    @Test func specialCharsInsideClassNotTreatedAsRegex() {
+        let regex = ScanSettings.globToRegex("[abc]*.txt")
+        #expect("a1.txt".range(of: regex, options: .regularExpression) != nil)
+        #expect("d1.txt".range(of: regex, options: .regularExpression) == nil)
+    }
 }
 
 // MARK: - ScanSettings: matchesGlob
@@ -632,26 +642,26 @@ struct GlobMatchingTests {
 struct ShouldIncludeFileTests {
 
     @Test func noPatternIncludesAll() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         #expect(settings.shouldIncludeFile(relativePath: "anything.txt") == true)
     }
 
     @Test func includePatternFilters() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.includeGlob = "*.swift"
         #expect(settings.shouldIncludeFile(relativePath: "main.swift") == true)
         #expect(settings.shouldIncludeFile(relativePath: "main.py") == false)
     }
 
     @Test func excludePatternFilters() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.excludeGlob = "*.lock"
         #expect(settings.shouldIncludeFile(relativePath: "Package.resolved") == true)
         #expect(settings.shouldIncludeFile(relativePath: "yarn.lock") == false)
     }
 
     @Test func excludeTakesPrecedence() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.includeGlob = "*.swift"
         settings.excludeGlob = "generated.swift"
         #expect(settings.shouldIncludeFile(relativePath: "main.swift") == true)
@@ -659,7 +669,7 @@ struct ShouldIncludeFileTests {
     }
 
     @Test func commaSeparatedPatterns() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.includeGlob = "*.swift, *.py"
         #expect(settings.shouldIncludeFile(relativePath: "main.swift") == true)
         #expect(settings.shouldIncludeFile(relativePath: "main.py") == true)
@@ -667,22 +677,45 @@ struct ShouldIncludeFileTests {
     }
 
     @Test func matchesAgainstFilename() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.includeGlob = "*.swift"
         // Pattern *.swift matches "main.swift" filename even though full path has /
         #expect(settings.shouldIncludeFile(relativePath: "src/main.swift") == true)
     }
 
     @Test func excludeMatchesAgainstFilename() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.excludeGlob = "*.lock"
         #expect(settings.shouldIncludeFile(relativePath: "deps/package.lock") == false)
     }
 
     @Test func emptyPatternsIgnored() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.includeGlob = "  ,  , "
         #expect(settings.shouldIncludeFile(relativePath: "anything.txt") == true)
+    }
+
+    @Test func pathPatternDoesNotFallBackToFilenameMatching() {
+        let settings = ScanSettings(defaults: nil)
+        settings.includeGlob = "src/*.swift"
+        #expect(settings.shouldIncludeFile(relativePath: "src/main.swift") == true)
+        #expect(settings.shouldIncludeFile(relativePath: "foo.swift") == false)
+        #expect(settings.shouldIncludeFile(relativePath: "other/foo.swift") == false)
+    }
+
+    @Test func excludePathPatternDoesNotFallBackToFilenameMatching() {
+        let settings = ScanSettings(defaults: nil)
+        settings.excludeGlob = "generated/*.swift"
+        #expect(settings.shouldIncludeFile(relativePath: "generated/foo.swift") == false)
+        #expect(settings.shouldIncludeFile(relativePath: "src/foo.swift") == true)
+    }
+
+    @Test func doubleStarMiddleExclude() {
+        let settings = ScanSettings(defaults: nil)
+        settings.excludeGlob = "**/.git/**"
+        #expect(settings.shouldIncludeFile(relativePath: ".git/config") == false)
+        #expect(settings.shouldIncludeFile(relativePath: "a/b/.git/config") == false)
+        #expect(settings.shouldIncludeFile(relativePath: "src/main.swift") == true)
     }
 }
 
@@ -763,11 +796,11 @@ struct TokenEstimationTests {
 struct PromptGenerationTests {
 
     @Test func basicPrompt() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         let file = makeFile("main.swift", path: "main.swift", content: "let x = 1")
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(prompt.contains("<directory_tree>"))
         #expect(prompt.contains("</directory_tree>"))
         #expect(prompt.contains("<file path=\"main.swift\">"))
@@ -776,112 +809,73 @@ struct PromptGenerationTests {
     }
 
     @Test func promptWithLineNumbers() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.showLineNumbers = true
         let file = makeFile("a.swift", path: "a.swift", content: "line1\nline2\nline3")
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(prompt.contains("1 | line1"))
         #expect(prompt.contains("2 | line2"))
         #expect(prompt.contains("3 | line3"))
     }
 
     @Test func promptWithAbsolutePaths() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.useAbsolutePaths = true
         let file = makeFile("a.swift", path: "a.swift", content: "code")
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(prompt.contains("<file path=\"/test/project/a.swift\">"))
     }
 
     @Test func promptWithRelativePaths() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.useAbsolutePaths = false
         let file = makeFile("a.swift", path: "a.swift", content: "code")
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(prompt.contains("<file path=\"a.swift\">"))
     }
 
-    @Test func promptWithGitDiff() {
-        let settings = ScanSettings()
-        settings.includeGitDiff = true
-        let root = makeDir("project")
-
-        let diff = "--- a/file.swift\n+++ b/file.swift\n- old\n+ new"
-        let prompt = settings.generatePrompt(root: root, gitDiff: diff)
-        #expect(prompt.contains("<git_diff>"))
-        #expect(prompt.contains(diff))
-        #expect(prompt.contains("</git_diff>"))
-    }
-
-    @Test func promptWithoutGitDiffWhenDisabled() {
-        let settings = ScanSettings()
-        settings.includeGitDiff = false
-        let root = makeDir("project")
-
-        let prompt = settings.generatePrompt(root: root, gitDiff: "some diff")
-        #expect(!prompt.contains("<git_diff>"))
-    }
-
-    @Test func promptWithGitDiffNil() {
-        let settings = ScanSettings()
-        settings.includeGitDiff = true
-        let root = makeDir("project")
-
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
-        #expect(!prompt.contains("<git_diff>"))
-    }
-
-    @Test func promptWithEmptyGitDiff() {
-        let settings = ScanSettings()
-        settings.includeGitDiff = true
-        let root = makeDir("project")
-
-        let prompt = settings.generatePrompt(root: root, gitDiff: "")
-        #expect(!prompt.contains("<git_diff>"))
-    }
-
     @Test func promptWithInstruction() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.instruction = "Review this code for bugs"
         let root = makeDir("project")
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(prompt.contains("<instruction>"))
         #expect(prompt.contains("Review this code for bugs"))
         #expect(prompt.contains("</instruction>"))
     }
 
     @Test func promptWithEmptyInstruction() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.instruction = "   \n  "
         let root = makeDir("project")
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(!prompt.contains("<instruction>"))
     }
 
     @Test func promptWithNoInstruction() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         let root = makeDir("project")
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         #expect(!prompt.contains("<instruction>"))
     }
 
     @Test func promptFullDirectoryTreeShowsDeselected() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.fullDirectoryTree = true
         let a = makeFile("a.swift", path: "a.swift", content: "a")
         let b = makeFile("b.swift", path: "b.swift", content: "b", selected: false)
         let root = makeDir("project", children: [a, b])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         // Tree should show both files
         #expect(prompt.contains("a.swift"))
         // But only selected file content is included
@@ -890,54 +884,51 @@ struct PromptGenerationTests {
     }
 
     @Test func promptSelectedOnlyTreeHidesDeselected() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.fullDirectoryTree = false
         let a = makeFile("a.swift", path: "a.swift", content: "a")
         let b = makeFile("b.swift", path: "b.swift", content: "b", selected: false)
         let root = makeDir("project", children: [a, b])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
+        let prompt = settings.generatePrompt(root: root)
         let treeSection = prompt.components(separatedBy: "</directory_tree>")[0]
         #expect(treeSection.contains("a.swift"))
         #expect(!treeSection.contains("b.swift"))
     }
 
     @Test func lineNumbersPadding() {
-        let settings = ScanSettings()
+        let settings = ScanSettings(defaults: nil)
         settings.showLineNumbers = true
-        // 10+ lines to test multi-digit padding
         let lines = (1...12).map { "line\($0)" }.joined(separator: "\n")
         let file = makeFile("a.swift", path: "a.swift", content: lines)
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: nil)
-        #expect(prompt.contains("1  | line1"))   // right-padded to 2 digits
+        let prompt = settings.generatePrompt(root: root)
+        #expect(prompt.contains(" 1 | line1"))
         #expect(prompt.contains("12 | line12"))
+        #expect(!prompt.contains("1  | line1"))
     }
 
-    @Test func promptOrderTreeThenFilesThenDiffThenInstruction() {
-        let settings = ScanSettings()
-        settings.includeGitDiff = true
+    @Test func promptOrderTreeThenFilesThenInstruction() {
+        let settings = ScanSettings(defaults: nil)
         settings.instruction = "check it"
         let file = makeFile("a.swift", path: "a.swift", content: "code")
         let root = makeDir("project", children: [file])
 
-        let prompt = settings.generatePrompt(root: root, gitDiff: "diff content")
+        let prompt = settings.generatePrompt(root: root)
         let treePos = prompt.range(of: "<directory_tree>")!.lowerBound
         let filePos = prompt.range(of: "<file path=")!.lowerBound
-        let diffPos = prompt.range(of: "<git_diff>")!.lowerBound
         let instrPos = prompt.range(of: "<instruction>")!.lowerBound
 
         #expect(treePos < filePos)
-        #expect(filePos < diffPos)
-        #expect(diffPos < instrPos)
+        #expect(filePos < instrPos)
     }
 }
 
-// MARK: - RepoScanner: Integration Tests
+// MARK: - FolderScanner: Integration Tests
 
-@Suite("RepoScanner Integration")
-struct RepoScannerTests {
+@Suite("FolderScanner Integration")
+struct FolderScannerTests {
 
     @Test func scanBuildsTreeFromTempDirectory() async throws {
         let tmpDir = FileManager.default.temporaryDirectory
@@ -950,7 +941,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -980,7 +971,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -999,7 +990,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1020,7 +1011,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: true,
             followSymlinks: false
@@ -1045,9 +1036,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        try runGit(arguments: ["init", "-q"], in: tmpDir)
-
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1068,7 +1057,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1091,7 +1080,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1111,7 +1100,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1133,7 +1122,7 @@ struct RepoScannerTests {
 
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let root = try await RepoScanner.scan(
+        let root = try await FolderScanner.scan(
             directory: tmpDir,
             showHiddenFiles: false,
             followSymlinks: false
@@ -1146,99 +1135,267 @@ struct RepoScannerTests {
         #expect(deep?.isExpanded == false)
     }
 
-    @Test func scanAddsGitIgnoredDirectoriesAsCollapsedPlaceholders() async throws {
+    @Test func scanCompletesWithManyFilesWithinTimeLimit() async throws {
         let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("repo2prompt_gitignore_\(UUID().uuidString)")
-        let ignoredDir = tmpDir.appendingPathComponent("node_modules/pkg")
-        let srcDir = tmpDir.appendingPathComponent("src")
+            .appendingPathComponent("repo2prompt_perf_\(UUID().uuidString)")
 
-        try FileManager.default.createDirectory(at: ignoredDir, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
-        try "node_modules/\n".write(to: tmpDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
-        try "func main() {}".write(to: srcDir.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
-        try "console.log('ignored')".write(to: ignoredDir.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
-
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        try runGit(arguments: ["init", "-q"], in: tmpDir)
-
-        let root = try await RepoScanner.scan(
-            directory: tmpDir,
-            showHiddenFiles: false,
-            followSymlinks: false
-        )
-
-        let ignoredNode = root.children.first { $0.name == "node_modules" }
-        #expect(ignoredNode != nil)
-        #expect(ignoredNode?.isGitIgnored == true)
-        #expect(ignoredNode?.isSelected == false)
-        #expect(ignoredNode?.isExpanded == false)
-        #expect(ignoredNode?.needsLazyLoad == true)
-        #expect(root.effectiveTokenCount > 0)
-        #expect(root.selectedFiles.allSatisfy { !$0.path.contains("node_modules/") })
-    }
-
-    @Test func materializeIgnoredDirectoryLoadsContentsOnDemand() async throws {
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("repo2prompt_materialize_\(UUID().uuidString)")
-        let ignoredDir = tmpDir.appendingPathComponent("node_modules/pkg")
-
-        try FileManager.default.createDirectory(at: ignoredDir, withIntermediateDirectories: true)
-        try "node_modules/\n".write(to: tmpDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
-        try "console.log('ignored')".write(to: ignoredDir.appendingPathComponent("index.js"), atomically: true, encoding: .utf8)
-
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
-
-        try runGit(arguments: ["init", "-q"], in: tmpDir)
-
-        let root = try await RepoScanner.scan(
-            directory: tmpDir,
-            showHiddenFiles: false,
-            followSymlinks: false
-        )
-
-        guard let ignoredNode = root.children.first(where: { $0.name == "node_modules" }) else {
-            throw NSError(
-                domain: "Repo2PromptTests",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Missing ignored directory placeholder"]
-            )
+        let fileCount = 5000
+        let fanout = 50
+        for bucket in 0..<(fileCount / fanout) {
+            let bucketDir = tmpDir.appendingPathComponent("bucket_\(bucket)")
+            try FileManager.default.createDirectory(at: bucketDir, withIntermediateDirectories: true)
+            for index in 0..<fanout {
+                let fileURL = bucketDir.appendingPathComponent("file_\(index).txt")
+                try "x".write(to: fileURL, atomically: true, encoding: .utf8)
+            }
         }
 
-        ignoredNode.isSelected = true
-        try await RepoScanner.materializeIgnoredDirectory(
-            ignoredNode,
+        let start = Date()
+        let root = try await FolderScanner.scan(
+            directory: tmpDir,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+        let elapsed = Date().timeIntervalSince(start)
+
+        #expect(root.selectedFileCount == fileCount)
+        #expect(elapsed < 10.0, "Scan of \(fileCount) files took \(elapsed)s, expected < 10s")
+    }
+}
+
+// MARK: - GitIgnoreParser: Unit Tests
+
+@Suite("GitIgnoreParser")
+struct GitIgnoreParserTests {
+
+    private func matcher(_ contents: String, base: String = "") -> GitIgnoreMatcher {
+        GitIgnoreParser.parse(contents: contents, base: base)
+    }
+
+    @Test func commentsAndBlankLinesIgnored() {
+        let m = matcher("""
+        # comment
+
+        build
+        """)
+        #expect(m.match(relativePath: "build", isDirectory: true) == true)
+        #expect(m.match(relativePath: "# comment", isDirectory: false) == nil)
+    }
+
+    @Test func unanchoredPatternMatchesAtAnyDepth() {
+        let m = matcher("node_modules")
+        #expect(m.match(relativePath: "node_modules", isDirectory: true) == true)
+        #expect(m.match(relativePath: "src/node_modules", isDirectory: true) == true)
+        #expect(m.match(relativePath: "a/b/c/node_modules", isDirectory: true) == true)
+    }
+
+    @Test func anchoredPatternOnlyMatchesAtBase() {
+        let m = matcher("/build")
+        #expect(m.match(relativePath: "build", isDirectory: true) == true)
+        #expect(m.match(relativePath: "src/build", isDirectory: true) == nil)
+    }
+
+    @Test func directoryOnlyPatternDoesNotMatchFiles() {
+        let m = matcher("cache/")
+        #expect(m.match(relativePath: "cache", isDirectory: true) == true)
+        #expect(m.match(relativePath: "cache", isDirectory: false) == nil)
+    }
+
+    @Test func starMatchesWithinSinglePathComponent() {
+        let m = matcher("*.log")
+        #expect(m.match(relativePath: "app.log", isDirectory: false) == true)
+        #expect(m.match(relativePath: "logs/app.log", isDirectory: false) == true)
+        #expect(m.match(relativePath: "app.txt", isDirectory: false) == nil)
+    }
+
+    @Test func questionMarkMatchesSingleChar() {
+        let m = matcher("file?.txt")
+        #expect(m.match(relativePath: "file1.txt", isDirectory: false) == true)
+        #expect(m.match(relativePath: "file12.txt", isDirectory: false) == nil)
+    }
+
+    @Test func characterClassMatches() {
+        let m = matcher("file[abc].txt")
+        #expect(m.match(relativePath: "filea.txt", isDirectory: false) == true)
+        #expect(m.match(relativePath: "fileb.txt", isDirectory: false) == true)
+        #expect(m.match(relativePath: "filed.txt", isDirectory: false) == nil)
+    }
+
+    @Test func negatedCharacterClassMatches() {
+        let m = matcher("file[!abc].txt")
+        #expect(m.match(relativePath: "filed.txt", isDirectory: false) == true)
+        #expect(m.match(relativePath: "filea.txt", isDirectory: false) == nil)
+    }
+
+    @Test func doubleStarTrailingMatchesEverythingInside() {
+        let m = matcher("vendor/**")
+        #expect(m.match(relativePath: "vendor/lib.js", isDirectory: false) == true)
+        #expect(m.match(relativePath: "vendor/a/b/c.js", isDirectory: false) == true)
+    }
+
+    @Test func doubleStarLeadingMatchesAtAnyDepth() {
+        let m = matcher("**/foo")
+        #expect(m.match(relativePath: "foo", isDirectory: false) == true)
+        #expect(m.match(relativePath: "a/foo", isDirectory: false) == true)
+        #expect(m.match(relativePath: "a/b/foo", isDirectory: false) == true)
+    }
+
+    @Test func doubleStarMiddleMatchesZeroOrMoreComponents() {
+        let m = matcher("a/**/b")
+        #expect(m.match(relativePath: "a/b", isDirectory: false) == true)
+        #expect(m.match(relativePath: "a/x/b", isDirectory: false) == true)
+        #expect(m.match(relativePath: "a/x/y/b", isDirectory: false) == true)
+    }
+
+    @Test func negationUnignoresPreviouslyMatched() {
+        let m = matcher("""
+        *.log
+        !important.log
+        """)
+        #expect(m.match(relativePath: "debug.log", isDirectory: false) == true)
+        #expect(m.match(relativePath: "important.log", isDirectory: false) == false)
+    }
+
+    @Test func scopedMatcherRespectsBase() {
+        let m = matcher("secret.txt", base: "src")
+        #expect(m.match(relativePath: "src/secret.txt", isDirectory: false) == true)
+        #expect(m.match(relativePath: "secret.txt", isDirectory: false) == nil)
+    }
+}
+
+// MARK: - GitIgnoreStack: Unit Tests
+
+@Suite("GitIgnoreStack")
+struct GitIgnoreStackTests {
+
+    @Test func deeperMatcherOverridesShallower() {
+        var stack = GitIgnoreStack()
+        stack.push(GitIgnoreParser.parse(contents: "*.log", base: ""))
+        stack.push(GitIgnoreParser.parse(contents: "!debug.log", base: "src"))
+
+        #expect(stack.isIgnored(relativePath: "app.log", isDirectory: false) == true)
+        #expect(stack.isIgnored(relativePath: "src/debug.log", isDirectory: false) == false)
+        #expect(stack.isIgnored(relativePath: "src/other.log", isDirectory: false) == true)
+    }
+
+    @Test func emptyStackNothingIgnored() {
+        let stack = GitIgnoreStack()
+        #expect(stack.isIgnored(relativePath: "anything", isDirectory: false) == false)
+    }
+}
+
+// MARK: - FolderScanner: .gitignore Integration
+
+@Suite("FolderScanner GitIgnore")
+struct FolderScannerGitIgnoreTests {
+
+    private func makeTemp(_ label: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("repo2prompt_gi_\(label)_\(UUID().uuidString)")
+    }
+
+    @Test func rootGitignoreExcludesMatchingFiles() async throws {
+        let tmp = makeTemp("root")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try ".env\n*.log\n".write(to: tmp.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "a".write(to: tmp.appendingPathComponent("keep.swift"), atomically: true, encoding: .utf8)
+        try "b".write(to: tmp.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
+        try "c".write(to: tmp.appendingPathComponent("app.log"), atomically: true, encoding: .utf8)
+
+        let root = try await FolderScanner.scan(
+            directory: tmp,
+            showHiddenFiles: true,
+            followSymlinks: false
+        )
+
+        let names = Set(root.selectedFiles.map { $0.path })
+        #expect(names.contains("keep.swift"))
+        #expect(!names.contains(".env"))
+        #expect(!names.contains("app.log"))
+    }
+
+    @Test func ignoredDirectoryBecomesCollapsedPlaceholder() async throws {
+        let tmp = makeTemp("dir")
+        let sub = tmp.appendingPathComponent("vendor/inner")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try "vendor/\n".write(to: tmp.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "x".write(to: sub.appendingPathComponent("lib.js"), atomically: true, encoding: .utf8)
+        try "keep".write(to: tmp.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
+
+        let root = try await FolderScanner.scan(
+            directory: tmp,
             showHiddenFiles: false,
             followSymlinks: false
         )
 
-        let pkg = ignoredNode.children.first { $0.name == "pkg" }
-        let index = pkg?.children.first { $0.name == "index.js" }
+        let vendor = root.children.first { $0.name == "vendor" }
+        #expect(vendor?.isDirectory == true)
+        #expect(vendor?.isGitIgnored == true)
+        #expect(vendor?.needsLazyLoad == true)
+        #expect(vendor?.isExpanded == false)
+        #expect(vendor?.children.isEmpty == true)
 
-        #expect(ignoredNode.needsLazyLoad == false)
-        #expect(index?.content == "console.log('ignored')")
-        #expect(index?.isSelected == true)
-        #expect(ignoredNode.selectedFiles.contains { $0.path == "node_modules/pkg/index.js" })
+        let mainFile = root.children.first { $0.name == "main.swift" }
+        #expect(mainFile != nil)
     }
 
-    @Test func gitDiffReturnsValueOnGitRepo() {
-        // This test runs against the actual Repo2Prompt repo
-        let repoURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let result = RepoScanner.gitDiff(in: repoURL)
-        // Should succeed (returns empty string or diff content, but not nil)
-        // We can't assert specific content since it depends on working tree state
-        // Just verify it doesn't crash and returns a string
-        #expect(result != nil || result == nil) // always passes, tests that it doesn't crash
+    @Test func nestedGitignoreOverridesParent() async throws {
+        let tmp = makeTemp("nested")
+        let srcDir = tmp.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try "*.log\n".write(to: tmp.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "!special.log\n".write(to: srcDir.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "x".write(to: tmp.appendingPathComponent("root.log"), atomically: true, encoding: .utf8)
+        try "y".write(to: srcDir.appendingPathComponent("debug.log"), atomically: true, encoding: .utf8)
+        try "z".write(to: srcDir.appendingPathComponent("special.log"), atomically: true, encoding: .utf8)
+
+        let root = try await FolderScanner.scan(
+            directory: tmp,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let files = Set(root.selectedFiles.map { $0.path })
+        #expect(files.contains("src/special.log"))
+        #expect(!files.contains("src/debug.log"))
+        #expect(!files.contains("root.log"))
     }
 
-    @Test func gitDiffReturnsNilForNonGitDir() {
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("repo2prompt_nogit_\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
+    @Test func materializeIgnoredDirectoryBypassesGitignore() async throws {
+        let tmp = makeTemp("mat")
+        let vendor = tmp.appendingPathComponent("vendor")
+        try FileManager.default.createDirectory(at: vendor, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let result = RepoScanner.gitDiff(in: tmpDir)
-        #expect(result == nil)
+        try "vendor/\n".write(to: tmp.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "inside".write(to: vendor.appendingPathComponent("lib.js"), atomically: true, encoding: .utf8)
+
+        let root = try await FolderScanner.scan(
+            directory: tmp,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        let vendorNode = root.children.first { $0.name == "vendor" }!
+        #expect(vendorNode.needsLazyLoad == true)
+
+        try await FolderScanner.materializeIgnoredDirectory(
+            vendorNode,
+            showHiddenFiles: false,
+            followSymlinks: false
+        )
+
+        #expect(vendorNode.needsLazyLoad == false)
+        #expect(vendorNode.children.contains { $0.name == "lib.js" })
     }
 }
 
@@ -1273,5 +1430,74 @@ struct SelectionStateTests {
         #expect(all != none)
         #expect(some != all)
         #expect(some != none)
+    }
+}
+
+// MARK: - ScanSettings: Persistence
+
+@Suite("ScanSettings Persistence", .serialized)
+struct ScanSettingsPersistenceTests {
+
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "Repo2PromptTests.ScanSettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    @Test func settingsPersistAcrossInstances() {
+        let defaults = makeDefaults()
+
+        let first = ScanSettings(defaults: defaults)
+        first.includeGlob = "*.swift"
+        first.excludeGlob = "*.lock"
+        first.showLineNumbers = true
+        first.useAbsolutePaths = true
+        first.fullDirectoryTree = true
+        first.showHiddenFiles = true
+        first.followSymlinks = true
+        first.instruction = "Look for bugs"
+        first.sortOrder = .nameAsc
+        first.showTokenMap = false
+
+        let second = ScanSettings(defaults: defaults)
+        #expect(second.includeGlob == "*.swift")
+        #expect(second.excludeGlob == "*.lock")
+        #expect(second.showLineNumbers == true)
+        #expect(second.useAbsolutePaths == true)
+        #expect(second.fullDirectoryTree == true)
+        #expect(second.showHiddenFiles == true)
+        #expect(second.followSymlinks == true)
+        #expect(second.instruction == "Look for bugs")
+        #expect(second.sortOrder == .nameAsc)
+        #expect(second.showTokenMap == false)
+    }
+
+    @Test func defaultsWhenNothingPersisted() {
+        let defaults = makeDefaults()
+
+        let settings = ScanSettings(defaults: defaults)
+        #expect(settings.includeGlob == "")
+        #expect(settings.excludeGlob == "")
+        #expect(settings.showLineNumbers == false)
+        #expect(settings.sortOrder == .tokensDesc)
+        #expect(settings.showTokenMap == true)
+    }
+
+    @Test func corruptedDataFallsBackToDefaults() {
+        let defaults = makeDefaults()
+        defaults.set(Data("not-json".utf8), forKey: ScanSettings.persistenceKey)
+
+        let settings = ScanSettings(defaults: defaults)
+        #expect(settings.includeGlob == "")
+        #expect(settings.sortOrder == .tokensDesc)
+    }
+
+    @Test func nilDefaultsDoesNotPersist() {
+        let settings = ScanSettings(defaults: nil)
+        settings.includeGlob = "*.swift"
+
+        let other = ScanSettings(defaults: nil)
+        #expect(other.includeGlob == "")
     }
 }

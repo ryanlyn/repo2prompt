@@ -23,3 +23,6 @@ Package.resolved
 *.ipa
 *.dSYM.zip
 *.dSYM
+
+# Claude
+.claude/settings.local.json

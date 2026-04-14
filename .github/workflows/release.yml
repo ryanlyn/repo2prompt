@@ -15,14 +15,6 @@ jobs:
   build-and-release:
     runs-on: macos-26
     timeout-minutes: 20
-    env:
-      ARCHIVE_PATH: ${{ runner.temp }}/Repo2Prompt.xcarchive
-      EXPORT_APP_PATH: ${{ runner.temp }}/Repo2Prompt.app
-      NOTARIZATION_ZIP: ${{ runner.temp }}/Repo2Prompt-notarization.zip
-      RELEASE_ZIP: ${{ runner.temp }}/Repo2Prompt.zip
-      KEYCHAIN_PATH: ${{ runner.temp }}/build.keychain-db
-      CERTIFICATE_PATH: ${{ runner.temp }}/developer-id.p12
-      APPSTORE_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +24,9 @@ jobs:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+
           echo "$MACOS_CERTIFICATE_P12" | openssl base64 -d -A -out "$CERTIFICATE_PATH"
 
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
@@ -56,13 +51,18 @@ jobs:
         env:
           APPSTORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPSTORE_CONNECT_PRIVATE_KEY }}
         run: |
+          APPSTORE_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+
           echo "$APPSTORE_CONNECT_PRIVATE_KEY" | openssl base64 -d -A -out "$APPSTORE_KEY_PATH"
           chmod 600 "$APPSTORE_KEY_PATH"
 
       - name: Archive
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: >
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          ARCHIVE_PATH="$RUNNER_TEMP/Repo2Prompt.xcarchive"
+
           xcodebuild archive
           -scheme Repo2Prompt
           -destination 'platform=macOS'
@@ -75,6 +75,10 @@ jobs:
 
       - name: Prepare app bundle
         run: |
+          ARCHIVE_PATH="$RUNNER_TEMP/Repo2Prompt.xcarchive"
+          EXPORT_APP_PATH="$RUNNER_TEMP/Repo2Prompt.app"
+          NOTARIZATION_ZIP="$RUNNER_TEMP/Repo2Prompt-notarization.zip"
+
           ditto "$ARCHIVE_PATH/Products/Applications/Repo2Prompt.app" "$EXPORT_APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$EXPORT_APP_PATH"
           ditto -c -k --keepParent "$EXPORT_APP_PATH" "$NOTARIZATION_ZIP"
@@ -84,6 +88,9 @@ jobs:
           APPSTORE_CONNECT_KEY_ID: ${{ secrets.APPSTORE_CONNECT_KEY_ID }}
           APPSTORE_CONNECT_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
         run: |
+          APPSTORE_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          NOTARIZATION_ZIP="$RUNNER_TEMP/Repo2Prompt-notarization.zip"
+
           xcrun notarytool submit "$NOTARIZATION_ZIP" \
             --key "$APPSTORE_KEY_PATH" \
             --key-id "$APPSTORE_CONNECT_KEY_ID" \
@@ -92,6 +99,9 @@ jobs:
 
       - name: Staple and package release zip
         run: |
+          EXPORT_APP_PATH="$RUNNER_TEMP/Repo2Prompt.app"
+          RELEASE_ZIP="$RUNNER_TEMP/Repo2Prompt.zip"
+
           xcrun stapler staple "$EXPORT_APP_PATH"
           xcrun stapler validate "$EXPORT_APP_PATH"
           ditto -c -k --keepParent "$EXPORT_APP_PATH" "$RELEASE_ZIP"
@@ -100,6 +110,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          RELEASE_ZIP="$RUNNER_TEMP/Repo2Prompt.zip"
           TAG="${GITHUB_REF#refs/tags/}"
           gh release create "$TAG" "$RELEASE_ZIP" \
             --title "Repo2Prompt $TAG" \

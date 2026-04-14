@@ -102,7 +102,19 @@ jobs:
           EXPORT_APP_PATH="$RUNNER_TEMP/Repo2Prompt.app"
           RELEASE_ZIP="$RUNNER_TEMP/Repo2Prompt.zip"
 
-          xcrun stapler staple "$EXPORT_APP_PATH"
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$EXPORT_APP_PATH"; then
+              break
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              echo "Stapling failed after $attempt attempts" >&2
+              exit 65
+            fi
+
+            sleep 15
+          done
+
           xcrun stapler validate "$EXPORT_APP_PATH"
           ditto -c -k --keepParent "$EXPORT_APP_PATH" "$RELEASE_ZIP"
 

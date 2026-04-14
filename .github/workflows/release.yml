@@ -73,13 +73,38 @@ jobs:
             CODE_SIGN_IDENTITY="Developer ID Application" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
 
-      - name: Prepare app bundle
+      - name: Export Developer ID app
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           ARCHIVE_PATH="$RUNNER_TEMP/Repo2Prompt.xcarchive"
-          EXPORT_APP_PATH="$RUNNER_TEMP/Repo2Prompt.app"
+          EXPORT_PATH="$RUNNER_TEMP/export"
+          EXPORT_APP_PATH="$EXPORT_PATH/Repo2Prompt.app"
+          EXPORT_OPTIONS_PLIST="$RUNNER_TEMP/exportOptions.plist"
           NOTARIZATION_ZIP="$RUNNER_TEMP/Repo2Prompt-notarization.zip"
 
-          ditto "$ARCHIVE_PATH/Products/Applications/Repo2Prompt.app" "$EXPORT_APP_PATH"
+          cat > "$EXPORT_OPTIONS_PLIST" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>developer-id</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Developer ID Application</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+
           codesign --verify --deep --strict --verbose=2 "$EXPORT_APP_PATH"
           ditto -c -k --keepParent "$EXPORT_APP_PATH" "$NOTARIZATION_ZIP"
 
@@ -99,7 +124,7 @@ jobs:
 
       - name: Staple and package release zip
         run: |
-          EXPORT_APP_PATH="$RUNNER_TEMP/Repo2Prompt.app"
+          EXPORT_APP_PATH="$RUNNER_TEMP/export/Repo2Prompt.app"
           RELEASE_ZIP="$RUNNER_TEMP/Repo2Prompt.zip"
           STAPLED=0
 

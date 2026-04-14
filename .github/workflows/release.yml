@@ -63,15 +63,15 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           ARCHIVE_PATH="$RUNNER_TEMP/Repo2Prompt.xcarchive"
 
-          xcodebuild archive
-          -scheme Repo2Prompt
-          -destination 'platform=macOS'
-          -configuration Release
-          -archivePath "$ARCHIVE_PATH"
-          DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
-          CODE_SIGN_STYLE=Manual
-          CODE_SIGN_IDENTITY="Developer ID Application"
-          OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
+          xcodebuild archive \
+            -scheme Repo2Prompt \
+            -destination 'platform=macOS' \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
 
       - name: Prepare app bundle
         run: |

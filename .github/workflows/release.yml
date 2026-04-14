@@ -14,30 +14,93 @@ permissions:
 jobs:
   build-and-release:
     runs-on: macos-26
-    timeout-minutes: 5
+    timeout-minutes: 20
+    env:
+      ARCHIVE_PATH: ${{ runner.temp }}/Repo2Prompt.xcarchive
+      EXPORT_APP_PATH: ${{ runner.temp }}/Repo2Prompt.app
+      NOTARIZATION_ZIP: ${{ runner.temp }}/Repo2Prompt-notarization.zip
+      RELEASE_ZIP: ${{ runner.temp }}/Repo2Prompt.zip
+      KEYCHAIN_PATH: ${{ runner.temp }}/build.keychain-db
+      CERTIFICATE_PATH: ${{ runner.temp }}/developer-id.p12
+      APPSTORE_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
     steps:
       - uses: actions/checkout@v4
 
+      - name: Import signing certificate
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$MACOS_CERTIFICATE_P12" | openssl base64 -d -A -out "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcodebuild
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Write notarization API key
+        env:
+          APPSTORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPSTORE_CONNECT_PRIVATE_KEY }}
+        run: |
+          echo "$APPSTORE_CONNECT_PRIVATE_KEY" | openssl base64 -d -A -out "$APPSTORE_KEY_PATH"
+          chmod 600 "$APPSTORE_KEY_PATH"
+
       - name: Archive
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: >
           xcodebuild archive
           -scheme Repo2Prompt
           -destination 'platform=macOS'
           -configuration Release
-          -archivePath ${{ runner.temp }}/Repo2Prompt.xcarchive
-          CODE_SIGN_IDENTITY="-"
-          CODE_SIGNING_REQUIRED=NO
+          -archivePath "$ARCHIVE_PATH"
+          DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
+          CODE_SIGN_STYLE=Manual
+          CODE_SIGN_IDENTITY="Developer ID Application"
+          OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH"
 
-      - name: Package app
+      - name: Prepare app bundle
         run: |
-          cd "${{ runner.temp }}/Repo2Prompt.xcarchive/Products/Applications"
-          zip -r "${{ runner.temp }}/Repo2Prompt.zip" Repo2Prompt.app
+          ditto "$ARCHIVE_PATH/Products/Applications/Repo2Prompt.app" "$EXPORT_APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$EXPORT_APP_PATH"
+          ditto -c -k --keepParent "$EXPORT_APP_PATH" "$NOTARIZATION_ZIP"
+
+      - name: Notarize app
+        env:
+          APPSTORE_CONNECT_KEY_ID: ${{ secrets.APPSTORE_CONNECT_KEY_ID }}
+          APPSTORE_CONNECT_ISSUER_ID: ${{ secrets.APPSTORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun notarytool submit "$NOTARIZATION_ZIP" \
+            --key "$APPSTORE_KEY_PATH" \
+            --key-id "$APPSTORE_CONNECT_KEY_ID" \
+            --issuer "$APPSTORE_CONNECT_ISSUER_ID" \
+            --wait
+
+      - name: Staple and package release zip
+        run: |
+          xcrun stapler staple "$EXPORT_APP_PATH"
+          xcrun stapler validate "$EXPORT_APP_PATH"
+          ditto -c -k --keepParent "$EXPORT_APP_PATH" "$RELEASE_ZIP"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" "${{ runner.temp }}/Repo2Prompt.zip" \
+          gh release create "$TAG" "$RELEASE_ZIP" \
             --title "Repo2Prompt $TAG" \
             --generate-notes

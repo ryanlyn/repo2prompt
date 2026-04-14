@@ -6,6 +6,8 @@ DerivedData/
 xcuserdata/
 *.xccheckout
 *.xcscmblueprint
+Repo2Prompt.xcodeproj/xcshareddata/
+Repo2Prompt.xcodeproj/project.xcworkspace/xcshareddata/
 
 # Swift Package Manager
 .build/

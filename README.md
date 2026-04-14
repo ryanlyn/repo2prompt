@@ -16,6 +16,4 @@ A macOS app that turns a repository into a structured prompt for UI-gated models
 
 Download `Repo2Prompt.zip` from the [latest release](../../releases/latest), unzip, and drag to Applications.
 
-On first launch, macOS will block the app because it's not notarized. To open it, go to the `Privacy & Security` settings screen and elect to open it.
-
 Requires macOS 26 or later.

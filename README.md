@@ -2,7 +2,7 @@
 
 A macOS app that turns a repository into a structured prompt for UI-gated models. Wanted something native without paying $15 per month. 
 
-<img width="994" height="632" alt="image" src="https://github.com/user-attachments/assets/030acd2f-412f-4c94-9904-8c08b48a47d3" />
+<img width="1112" height="812" alt="image" src="https://github.com/user-attachments/assets/096cfb36-ef35-4d2f-b615-60862679d44c" />
 
 ## Features
 
